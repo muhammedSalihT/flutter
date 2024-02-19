@@ -431,6 +431,35 @@ void main() {
         Cache: () => Cache.test(processManager: FakeProcessManager.any()),
       });
 
+      testUsingContext('fails when --flavor is used with an unsupported target platform', () async {
+        const List<String> runCommand = <String>[
+          'run',
+          '--no-pub',
+          '--no-hot',
+          '--flavor=vanilla',
+          '-d',
+          'all',
+        ];
+
+        // Useful for test readability.
+        // ignore: avoid_redundant_argument_values
+        final FakeDevice deviceWithoutFlavorSupport = FakeDevice(supportsFlavors: false);
+        final FakeDevice deviceWithFlavorSupport = FakeDevice(supportsFlavors: true);
+        testDeviceManager.devices = <Device>[deviceWithoutFlavorSupport, deviceWithFlavorSupport];
+
+        await expectLater(
+          () => createTestCommandRunner(RunCommand()).run(runCommand),
+          throwsToolExit(
+            message: '--flavor is only supported for Android, macOS, and iOS devices.',
+          ),
+        );
+      }, overrides: <Type, Generator>{
+        DeviceManager: () => testDeviceManager,
+        FileSystem: () => fs,
+        ProcessManager: () => FakeProcessManager.any(),
+        Cache: () => Cache.test(processManager: FakeProcessManager.any()),
+      });
+
       testUsingContext('forwards --uninstall-only to DebuggingOptions', () async {
         final RunCommand command = RunCommand();
         final FakeDevice mockDevice = FakeDevice(
@@ -961,6 +990,99 @@ void main() {
         ProcessManager: () => FakeProcessManager.any(),
       });
     });
+
+    group('--web-header', () {
+      setUp(() {
+        fileSystem.file('lib/main.dart').createSync(recursive: true);
+        fileSystem.file('pubspec.yaml').createSync();
+        fileSystem.file('.packages').createSync();
+        final FakeDevice device = FakeDevice(isLocalEmulator: true, platformType: PlatformType.android);
+        testDeviceManager.devices = <Device>[device];
+      });
+
+      testUsingContext('can accept simple, valid values', () async {
+        final RunCommand command = RunCommand();
+        await expectLater(
+          () => createTestCommandRunner(command).run(<String>[
+            'run',
+            '--no-pub', '--no-hot',
+            '--web-header', 'foo = bar',
+          ]), throwsToolExit());
+
+        final DebuggingOptions options = await command.createDebuggingOptions(true);
+        expect(options.webHeaders, <String, String>{'foo': 'bar'});
+      }, overrides: <Type, Generator>{
+        FileSystem: () => fileSystem,
+        ProcessManager: () => FakeProcessManager.any(),
+        Logger: () => BufferLogger.test(),
+        DeviceManager: () => testDeviceManager,
+      });
+
+      testUsingContext('throws a ToolExit when no value is provided', () async {
+        final RunCommand command = RunCommand();
+        await expectLater(
+          () => createTestCommandRunner(command).run(<String>[
+            'run',
+            '--no-pub', '--no-hot',
+            '--web-header',
+            'foo',
+          ]), throwsToolExit(message: 'Invalid web headers: foo'));
+
+        await expectLater(
+          () => command.createDebuggingOptions(true),
+          throwsToolExit(),
+        );
+      }, overrides: <Type, Generator>{
+        FileSystem: () => fileSystem,
+        ProcessManager: () => FakeProcessManager.any(),
+        Logger: () => BufferLogger.test(),
+        DeviceManager: () => testDeviceManager,
+      });
+
+      testUsingContext('throws a ToolExit when value includes delimiter characters', () async {
+        fileSystem.file('lib/main.dart').createSync(recursive: true);
+        fileSystem.file('pubspec.yaml').createSync();
+        fileSystem.file('.packages').createSync();
+
+        final RunCommand command = RunCommand();
+        await expectLater(
+          () => createTestCommandRunner(command).run(<String>[
+            'run',
+            '--no-pub', '--no-hot',
+            '--web-header', 'hurray/headers=flutter',
+          ]), throwsToolExit());
+
+        await expectLater(
+          () => command.createDebuggingOptions(true),
+          throwsToolExit(message: 'Invalid web headers: hurray/headers=flutter'),
+        );
+      }, overrides: <Type, Generator>{
+        FileSystem: () => fileSystem,
+        ProcessManager: () => FakeProcessManager.any(),
+        Logger: () => BufferLogger.test(),
+        DeviceManager: () => testDeviceManager,
+      });
+
+      testUsingContext('accepts headers with commas in them', () async {
+        final RunCommand command = RunCommand();
+        await expectLater(
+          () => createTestCommandRunner(command).run(<String>[
+            'run',
+            '--no-pub', '--no-hot',
+            '--web-header', 'hurray=flutter,flutter=hurray',
+          ]), throwsToolExit());
+
+        final DebuggingOptions options = await command.createDebuggingOptions(true);
+        expect(options.webHeaders, <String, String>{
+          'hurray': 'flutter,flutter=hurray'
+        });
+      }, overrides: <Type, Generator>{
+        FileSystem: () => fileSystem,
+        ProcessManager: () => FakeProcessManager.any(),
+        Logger: () => BufferLogger.test(),
+        DeviceManager: () => testDeviceManager,
+      });
+    });
   });
 
   group('dart-defines and web-renderer options', () {
@@ -1128,12 +1250,12 @@ void main() {
       '--use-test-fonts',
       '--trace-skia',
       '--trace-systrace',
+      '--trace-to-file=path/to/trace.binpb',
       '--verbose-system-logs',
       '--null-assertions',
       '--native-null-assertions',
       '--enable-impeller',
       '--enable-vulkan-validation',
-      '--impeller-force-gl',
       '--trace-systrace',
       '--enable-software-rendering',
       '--skia-deterministic-rendering',
@@ -1148,13 +1270,13 @@ void main() {
     expect(options.useTestFonts, true);
     expect(options.traceSkia, true);
     expect(options.traceSystrace, true);
+    expect(options.traceToFile, 'path/to/trace.binpb');
     expect(options.verboseSystemLogs, true);
     expect(options.nullAssertions, true);
     expect(options.nativeNullAssertions, true);
     expect(options.traceSystrace, true);
     expect(options.enableImpeller, ImpellerStatus.enabled);
     expect(options.enableVulkanValidation, true);
-    expect(options.impellerForceGL, true);
     expect(options.enableSoftwareRendering, true);
     expect(options.skiaDeterministicRendering, true);
     expect(options.usingCISystem, true);
@@ -1206,9 +1328,6 @@ class FakeAndroidSdk extends Fake implements AndroidSdk {
   String get adbPath => 'adb';
 }
 
-// Unfortunately Device, despite not being immutable, has an `operator ==`.
-// Until we fix that, we have to also ignore related lints here.
-// ignore: avoid_implementing_value_types
 class FakeDevice extends Fake implements Device {
   FakeDevice({
     bool isLocalEmulator = false,
@@ -1216,11 +1335,13 @@ class FakeDevice extends Fake implements Device {
     String sdkNameAndVersion = '',
     PlatformType platformType = PlatformType.ios,
     bool isSupported = true,
+    bool supportsFlavors = false,
   }): _isLocalEmulator = isLocalEmulator,
       _targetPlatform = targetPlatform,
       _sdkNameAndVersion = sdkNameAndVersion,
       _platformType = platformType,
-      _isSupported = isSupported;
+      _isSupported = isSupported,
+      _supportsFlavors = supportsFlavors;
 
   static const int kSuccess = 1;
   static const int kFailure = -1;
@@ -1229,6 +1350,7 @@ class FakeDevice extends Fake implements Device {
   final String _sdkNameAndVersion;
   final PlatformType _platformType;
   final bool _isSupported;
+  final bool _supportsFlavors;
 
   @override
   Category get category => Category.mobile;
@@ -1255,6 +1377,9 @@ class FakeDevice extends Fake implements Device {
 
   @override
   bool get supportsFastStart => false;
+
+  @override
+  bool get supportsFlavors => _supportsFlavors;
 
   @override
   bool get ephemeral => true;
@@ -1344,9 +1469,6 @@ class FakeDevice extends Fake implements Device {
   }
 }
 
-// Unfortunately Device, despite not being immutable, has an `operator ==`.
-// Until we fix that, we have to also ignore related lints here.
-// ignore: avoid_implementing_value_types
 class FakeIOSDevice extends Fake implements IOSDevice {
   FakeIOSDevice({
     this.connectionInterface = DeviceConnectionInterface.attached,
@@ -1472,6 +1594,7 @@ class CapturingAppDomain extends AppDomain {
     bool machine = true,
     String? userIdentifier,
     bool enableDevTools = true,
+    String? flavor,
   }) async {
     this.multidexEnabled = multidexEnabled;
     this.userIdentifier = userIdentifier;
